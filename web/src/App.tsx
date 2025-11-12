@@ -14,6 +14,11 @@ import ProtectedRoute from "@/components/auth/ProtectedRoute";
 import { AuthProvider } from "@/context/auth-context";
 import useSWR from "swr";
 import { FrigateConfig } from "./types/frigateConfig";
+import { useDocDomain } from "./hooks/use-doc-domain";
+import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { LuExternalLink } from "react-icons/lu";
+import { profile } from "console";
 
 const Live = lazy(() => import("@/pages/Live"));
 const Events = lazy(() => import("@/pages/Events"));
@@ -50,6 +55,8 @@ function DefaultAppView() {
   const { data: config } = useSWR<FrigateConfig>("config", {
     revalidateOnFocus: false,
   });
+  const { t } = useTranslation(["common"]);
+  const { data: profile } = useSWR("profile");
   return (
     <div className="size-full overflow-hidden">
       {isDesktop && <Sidebar />}
@@ -64,6 +71,9 @@ function DefaultAppView() {
             : "bottom-8 left-[52px]",
         )}
       >
+        {profile.username === "anonymous" && (
+
+        )}
         <Suspense>
           <Routes>
             <Route
