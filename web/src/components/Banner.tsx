@@ -1,36 +1,32 @@
 import { useDocDomain } from "@/hooks/use-doc-domain";
+import { cn } from "@/lib/utils";
 import { LuExternalLink } from "react-icons/lu";
 import { Link } from "react-router-dom";
 
 const Banner = ({
   children,
   type,
-  className
 }: {
   children: React.ReactNode;
   type: "info" | "warning" | "error";
-  className?: string;
 }) => {
-  const { getLocaleDocUrl } = useDocDomain();
+  const backgroundClass =
+    type === "info"
+      ? "bg-info"
+      : type === "warning"
+        ? "bg-warning"
+        : "bg-destructive";
   return (
     <div
       id="banner"
-      className="flex w-full items-center justify-center bg-destructive p-2"
+      className={cn(
+        "flex w-full items-center justify-center p-2",
+        backgroundClass,
+      )}
     >
-      <span className="text-center text-sm">
-        You are currently accessing the system through an unprotected port
-        without authentication, which may pose a serious risk of data leakage.
-        Please ensure this port is inaccessible from external networks. <br />
-        <Link
-          to={getLocaleDocUrl("configuration/live")}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline"
-        >
-          {t("readTheDocumentation", { ns: "common" })}
-          <LuExternalLink className="ml-2 inline-flex size-3" />
-        </Link>
-      </span>
+      <span className="text-center text-sm">{children}</span>
     </div>
   );
 };
+
+export default Banner;

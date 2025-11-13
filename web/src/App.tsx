@@ -18,7 +18,8 @@ import { useDocDomain } from "./hooks/use-doc-domain";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { LuExternalLink } from "react-icons/lu";
-import { profile } from "console";
+import Banner from "./components/Banner";
+import { buttonVariants } from "./components/ui/button";
 
 const Live = lazy(() => import("@/pages/Live"));
 const Events = lazy(() => import("@/pages/Events"));
@@ -57,6 +58,25 @@ function DefaultAppView() {
   });
   const { t } = useTranslation(["common"]);
   const { data: profile } = useSWR("profile");
+  const { getLocaleDocUrl } = useDocDomain();
+  const unauthenticatedTips = (
+    <>
+      You are currently accessing the system through an unprotected port without
+      authentication, which may pose a serious risk of data leakage.
+      <Link
+        to={getLocaleDocUrl("configuration/live")}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(
+          buttonVariants({ variant: "default" }),
+          "ml-2 h-5 px-2 text-sm",
+        )}
+      >
+        {t("readTheDocumentation", { ns: "common" })}
+        <LuExternalLink className="ml-2 inline-flex size-3" />
+      </Link>
+    </>
+  );
   return (
     <div className="size-full overflow-hidden">
       {isDesktop && <Sidebar />}
@@ -71,8 +91,8 @@ function DefaultAppView() {
             : "bottom-8 left-[52px]",
         )}
       >
-        {profile.username === "anonymous" && (
-
+        {profile?.username === "anonymous" && (
+          <Banner type="warning" children={unauthenticatedTips}></Banner>
         )}
         <Suspense>
           <Routes>
