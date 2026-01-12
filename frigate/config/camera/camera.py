@@ -27,6 +27,7 @@ from ..classification import (
 from .audio import AudioConfig
 from .birdseye import BirdseyeCameraConfig
 from .detect import DetectConfig
+from .falling_object import FallingObjectConfig
 from .ffmpeg import CameraFfmpegConfig, CameraInput
 from .live import CameraLiveConfig
 from .motion import MotionConfig
@@ -75,6 +76,9 @@ class CameraConfig(FrigateBaseModel):
     )
     birdseye: BirdseyeCameraConfig = Field(
         default_factory=BirdseyeCameraConfig, title="Birdseye camera configuration."
+    )
+    falling_object: FallingObjectConfig = Field(
+        default_factory=FallingObjectConfig, title="Falling object detection configuration."
     )
     detect: DetectConfig = Field(
         default_factory=DetectConfig, title="Object detection configuration."

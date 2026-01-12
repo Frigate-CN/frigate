@@ -18,6 +18,7 @@ class EventMetadataTypeEnum(str, Enum):
     attribute = "attribute"
     lpr_event_create = "lpr_event_create"
     save_lpr_snapshot = "save_lpr_snapshot"
+    falling_object_event_create = "falling_object_event_create"
 
 
 class EventMetadataPublisher(Publisher):

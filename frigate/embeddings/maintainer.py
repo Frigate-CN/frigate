@@ -53,6 +53,9 @@ from frigate.data_processing.real_time.custom_classification import (
     CustomStateClassificationProcessor,
 )
 from frigate.data_processing.real_time.face import FaceRealTimeProcessor
+from frigate.data_processing.real_time.falling_object import (
+    FallingObjectRealTimeProcessor,
+)
 from frigate.data_processing.real_time.license_plate import (
     LicensePlateRealTimeProcessor,
 )
@@ -185,6 +188,30 @@ class EmbeddingMaintainer(threading.Thread):
                 )
             )
 
+        # Initialize falling object processor if any camera has it enabled
+        logger.info(f"Available cameras: {list(self.config.cameras.keys())}")
+
+        cameras_with_falling_object = [
+            name for name, c in self.config.cameras.items() if c.falling_object.enabled
+        ]
+        logger.info(
+            f"Cameras with falling_object enabled: {cameras_with_falling_object}"
+        )
+
+        if any(c.falling_object.enabled for c in self.config.cameras.values()):
+            logger.info(
+                "Falling object detection enabled, initializing FallingObjectRealTimeProcessor"
+            )
+            self.realtime_processors.append(
+                FallingObjectRealTimeProcessor(
+                    self.config,
+                    self.requestor,
+                    self.event_metadata_publisher,
+                    metrics,
+                )
+            )
+            logger.info("FallingObjectRealTimeProcessor initialized successfully")
+
         for model_config in self.config.classification.custom.values():
             self.realtime_processors.append(
                 CustomStateClassificationProcessor(
@@ -260,6 +287,13 @@ class EmbeddingMaintainer(threading.Thread):
 
         # recordings data
         self.recordings_available_through: dict[str, float] = {}
+
+    def get_falling_object_trajectories(self, camera: str) -> list[dict[str, Any]]:
+        """Get falling object trajectories for a camera."""
+        for processor in self.realtime_processors:
+            if isinstance(processor, FallingObjectRealTimeProcessor):
+                return processor.get_trajectories(camera)
+        return []
 
     def run(self) -> None:
         """Maintain a SQLite-vec database for semantic search."""
@@ -627,16 +661,32 @@ class EmbeddingMaintainer(threading.Thread):
 
         camera, frame_name, _, _, motion_boxes, _ = data
 
-        if not camera or len(motion_boxes) == 0:
+        if not camera:
             return
 
         camera_config = self.config.cameras[camera]
+
+        # Check if falling object detection is enabled for this camera
+        falling_object_enabled = camera_config.falling_object.enabled
+
+        logger.debug(
+            f"_process_frame_updates: camera={camera}, falling_object_enabled={falling_object_enabled}, motion_boxes={len(motion_boxes)}"
+        )
         dedicated_lpr_enabled = (
             camera_config.type == CameraTypeEnum.lpr
             and "license_plate" not in camera_config.objects.track
         )
 
-        if not dedicated_lpr_enabled and len(self.config.classification.custom) == 0:
+        # For falling_object, we need to process even if motion_boxes is empty
+        # because it does its own motion detection
+        if not falling_object_enabled and len(motion_boxes) == 0:
+            return
+
+        if (
+            not dedicated_lpr_enabled
+            and len(self.config.classification.custom) == 0
+            and not falling_object_enabled
+        ):
             # no active features that use this data
             return
 
@@ -663,6 +713,9 @@ class EmbeddingMaintainer(threading.Thread):
                 processor.process_frame(
                     {"camera": camera, "motion": motion_boxes}, yuv_frame
                 )
+
+            if isinstance(processor, FallingObjectRealTimeProcessor):
+                processor.process_frame({"camera": camera}, yuv_frame)
 
         self.frame_manager.close(frame_name)
 

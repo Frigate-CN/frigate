@@ -620,6 +620,58 @@ class TrackedObjectProcessor(threading.Thread):
             DetectionTypeEnum.lpr.value,
         )
 
+    def create_falling_object_event(self, payload: tuple) -> None:
+        (
+            frame_time,
+            camera_name,
+            event_id,
+            box,
+            score,
+            metadata,
+        ) = payload
+
+        # send event to event maintainer
+        self.event_sender.publish(
+            (
+                EventTypeEnum.falling_object,
+                EventStateEnum.start,
+                camera_name,
+                "",
+                {
+                    "id": event_id,
+                    "label": "falling_object",
+                    "score": score,
+                    "camera": camera_name,
+                    "start_time": frame_time
+                    - self.config.cameras[camera_name].record.event_pre_capture,
+                    "end_time": None,
+                    "has_clip": self.config.cameras[camera_name].record.enabled
+                    and self.config.cameras[camera_name].falling_object.save_clips,
+                    "has_snapshot": self.config.cameras[camera_name].snapshots.enabled
+                    and self.config.cameras[camera_name].falling_object.save_snapshots,
+                    "type": "falling_object",
+                    "box": box,
+                    "falling_metadata": metadata,
+                },
+            )
+        )
+
+        self.ongoing_manual_events[event_id] = camera_name
+        self.detection_publisher.publish(
+            (
+                camera_name,
+                frame_time,
+                {
+                    "state": ManualEventState.start,
+                    "label": "falling_object",
+                    "event_id": event_id,
+                    "end_time": None,
+                    "box": box,
+                },
+            ),
+            DetectionTypeEnum.api.value,
+        )
+
     def end_manual_event(self, payload: tuple) -> None:
         (event_id, end_time) = payload
 
@@ -730,6 +782,8 @@ class TrackedObjectProcessor(threading.Thread):
                     self.create_lpr_event(payload)
                 elif topic.endswith(EventMetadataTypeEnum.save_lpr_snapshot.value):
                     self.save_lpr_snapshot(payload)
+                elif topic.endswith(EventMetadataTypeEnum.falling_object_event_create.value):
+                    self.create_falling_object_event(payload)
                 elif topic.endswith(EventMetadataTypeEnum.manual_event_create.value):
                     self.create_manual_event(payload)
                 elif topic.endswith(EventMetadataTypeEnum.manual_event_end.value):

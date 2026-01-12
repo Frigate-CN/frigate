@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field
 
 from ..base import FrigateBaseModel
 
@@ -17,7 +17,7 @@ class FallingObjectFilterConfig(FrigateBaseModel):
     """Filter configuration for falling object detection."""
 
     enabled: bool = Field(
-        default=True,
+        default=False,
         title="Enable falling object detection.",
     )
     min_confidence: float = Field(
@@ -47,17 +47,6 @@ class FallingObjectFilterConfig(FrigateBaseModel):
         le=50,
         title="Number of trajectory points to track.",
     )
-    objects: list[str] = Field(
-        default_factory=lambda: ["person", "bottle", "cup", "backpack", "handbag"],
-        title="Object types to monitor for falling.",
-    )
-
-    @field_validator("objects", mode="before")
-    @classmethod
-    def validate_objects(cls, v):
-        if isinstance(v, str):
-            return [obj.strip() for obj in v.split(",")]
-        return v
 
 
 class FallingObjectZoneConfig(FrigateBaseModel):
