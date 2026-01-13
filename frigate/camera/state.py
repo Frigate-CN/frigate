@@ -35,11 +35,13 @@ class CameraState:
         config: FrigateConfig,
         frame_manager: SharedMemoryFrameManager,
         ptz_autotracker_thread: PtzAutoTrackerThread,
+        embeddings=None,
     ):
         self.name = name
         self.config = config
         self.camera_config = config.cameras[name]
         self.frame_manager = frame_manager
+        self.embeddings = embeddings
         self.best_objects: dict[str, TrackedObject] = {}
         self.tracked_objects: dict[str, TrackedObject] = {}
         self.frame_cache = {}
@@ -266,6 +268,65 @@ class CameraState:
                         color,
                         2,
                     )
+
+        # Draw falling object trajectories if embeddings context is available
+        if draw_options.get("paths") and self.embeddings:
+            try:
+                falling_trajectories = self.embeddings.get_falling_object_trajectories(self.name)
+
+                # Draw each falling object trajectory
+                for trajectory in falling_trajectories or []:
+                    if "trajectory" in trajectory and len(trajectory["trajectory"]) > 1:
+                        traj_points = [
+                            (
+                                int(point["x"]),
+                                int(point["y"]),
+                            )
+                            for point in trajectory["trajectory"]
+                        ]
+
+                        # Draw trajectory path
+                        for i in range(1, len(traj_points)):
+                            cv2.line(
+                                frame_copy,
+                                traj_points[i - 1],
+                                traj_points[i],
+                                (0, 255, 255),  # Yellow color for falling object trajectories
+                                2,
+                            )
+
+                        # Draw trajectory points
+                        for point in traj_points:
+                            cv2.circle(frame_copy, point, 3, (0, 255, 255), -1)  # Yellow circles
+
+                        # Draw velocity info
+                        if "velocity_y" in trajectory:
+                            start_point = traj_points[0]
+                            end_point = traj_points[-1]
+
+                            # Draw velocity vector
+                            cv2.arrowedLine(
+                                frame_copy,
+                                start_point,
+                                end_point,
+                                (0, 255, 0),  # Green arrow for direction
+                                2,
+                                tipLength=0.3
+                            )
+
+                            # Draw velocity text
+                            text = f"V_y: {trajectory['velocity_y']:.1f}"
+                            cv2.putText(
+                                frame_copy,
+                                text,
+                                (end_point[0], end_point[1] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 255, 0),
+                                1,
+                            )
+            except Exception as e:
+                logger.warning(f"Could not draw falling object trajectories: {e}")
 
         return frame_copy
 

@@ -412,6 +412,10 @@ class EmbeddingMaintainer(threading.Thread):
                         response = self.embeddings.start_reindex()
                         return "started" if response else "in_progress"
 
+                # Handle falling object trajectory requests
+                if topic == EmbeddingsRequestEnum.get_falling_object_trajectories.value:
+                    return self.get_falling_object_trajectories(data["camera"])
+
                 processors = [self.realtime_processors, self.post_processors]
                 for processor_list in processors:
                     for processor in processor_list:

@@ -31,6 +31,8 @@ class EmbeddingsRequestEnum(Enum):
     reprocess_plate = "reprocess_plate"
     # Review Descriptions
     summarize_review = "summarize_review"
+    # Falling Object Detection
+    get_falling_object_trajectories = "get_falling_object_trajectories"
 
 
 class EmbeddingsResponder:

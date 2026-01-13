@@ -319,3 +319,10 @@ class EmbeddingsContext:
             EmbeddingsRequestEnum.summarize_review.value,
             {"start_ts": start_ts, "end_ts": end_ts},
         )
+
+    def get_falling_object_trajectories(self, camera: str) -> list[dict[str, Any]]:
+        """Get falling object trajectories for a camera."""
+        return self.requestor.send_data(
+            EmbeddingsRequestEnum.get_falling_object_trajectories.value,
+            {"camera": camera},
+        )

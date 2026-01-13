@@ -61,12 +61,14 @@ class TrackedObjectProcessor(threading.Thread):
         tracked_objects_queue: MpQueue,
         ptz_autotracker_thread: PtzAutoTrackerThread,
         stop_event: MpEvent,
+        embeddings: Any = None,
     ) -> None:
         super().__init__(name="detected_frames_processor")
         self.config = config
         self.dispatcher = dispatcher
         self.tracked_objects_queue = tracked_objects_queue
         self.stop_event: MpEvent = stop_event
+        self.embeddings = embeddings
         self.camera_states: dict[str, CameraState] = {}
         self.frame_manager = SharedMemoryFrameManager()
         self.last_motion_detected: dict[str, float] = {}
@@ -227,7 +229,7 @@ class TrackedObjectProcessor(threading.Thread):
                 self.requestor.send_data(UPDATE_CAMERA_ACTIVITY, self.camera_activity)
 
         camera_state = CameraState(
-            camera, self.config, self.frame_manager, self.ptz_autotracker_thread
+            camera, self.config, self.frame_manager, self.ptz_autotracker_thread, self.embeddings
         )
         camera_state.on("start", start)
         camera_state.on("autotrack", autotrack)

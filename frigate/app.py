@@ -393,6 +393,7 @@ class FrigateApp:
             self.detected_frames_queue,
             self.ptz_autotracker_thread,
             self.stop_event,
+            self.embeddings,
         )
         self.detected_frames_processor.start()
 
