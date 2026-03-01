@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 import cv2
@@ -37,6 +38,7 @@ except ModuleNotFoundError:
 logger = logging.getLogger(__name__)
 
 MAX_OBJECT_CLASSIFICATIONS = 16
+MAX_CONCURRENT_CLASSIFICATIONS_PER_OBJECT = 3
 
 
 class CustomStateClassificationProcessor(RealTimeProcessorApi):
@@ -360,6 +362,8 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         self.classification_history: dict[str, list[tuple[str, float, float]]] = {}
         self.labelmap: dict[int, str] = {}
         self.classifications_per_second = EventsPerSecond()
+        self.active_tasks: dict[str, int] = {}
+        self.interpreter_lock = threading.Lock()
 
         if (
             self.metrics
@@ -400,6 +404,137 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         if self.inference_speed:
             self.inference_speed.update(duration)
 
+    def _run_inference_thread(
+        self, crop: np.ndarray, object_id: str, camera: str, timestamp: float
+    ) -> None:
+        """Run inference in a separate thread to avoid blocking."""
+        try:
+            with self.interpreter_lock:
+                if self.interpreter is None:
+                    return
+
+                input = np.expand_dims(crop, axis=0)
+                self.interpreter.set_tensor(self.tensor_input_details[0]["index"], input)
+                self.interpreter.invoke()
+                res = self.interpreter.get_tensor(self.tensor_output_details[0]["index"])[0]
+                probs = res / res.sum(axis=0)
+
+                best_id = np.argmax(probs)
+                score = round(probs[best_id], 2)
+                self.__update_metrics(datetime.datetime.now().timestamp() - timestamp)
+
+                label = self.labelmap[best_id]
+
+            # Update the "pending" entry in classification_history with the actual result
+            if object_id in self.classification_history:
+                for i, (hist_label, hist_score, hist_time) in enumerate(self.classification_history[object_id]):
+                    if hist_label == "pending" and abs(hist_time - timestamp) < 0.1:
+                        self.classification_history[object_id][i] = (label, score, timestamp)
+                        logger.debug(
+                            f"Updated pending entry for {object_id} at index {i}: {label} ({score})"
+                        )
+                        break
+
+            save_attempts = (
+                self.model_config.save_attempts
+                if self.model_config.save_attempts is not None
+                else 200
+            )
+
+            threading.Thread(
+                target=write_classification_attempt,
+                name=f"_save_classification_{object_id}",
+                daemon=True,
+                args=(
+                    self.train_dir,
+                    cv2.cvtColor(crop, cv2.COLOR_RGB2BGR),
+                    object_id,
+                    timestamp,
+                    label,
+                    score,
+                    save_attempts,
+                ),
+            ).start()
+
+            if score >= self.model_config.threshold:
+                self._publish_result(object_id, camera, label, score, timestamp)
+        except Exception as e:
+            logger.error(f"Error in inference thread for {object_id}: {e}", exc_info=True)
+        finally:
+            with self.interpreter_lock:
+                self.active_tasks[object_id] = self.active_tasks.get(object_id, 1) - 1
+                if self.active_tasks[object_id] <= 0:
+                    del self.active_tasks[object_id]
+
+    def _publish_result(
+        self, object_id: str, camera: str, label: str, score: float, timestamp: float
+    ) -> None:
+        """Publish classification result after weighted scoring."""
+        consensus_label, consensus_score = self.get_weighted_score(
+            object_id, label, score, timestamp
+        )
+
+        logger.debug(
+            f"{self.model_config.name}: get_weighted_score returned consensus_label={consensus_label}, consensus_score={consensus_score} for {object_id}"
+        )
+
+        if consensus_label is None:
+            return
+
+        logger.debug(
+            f"{self.model_config.name}: Publishing sub_label={consensus_label} for object {object_id} on {camera}"
+        )
+
+        if (
+            self.model_config.object_config.classification_type
+            == ObjectClassificationType.sub_label
+        ):
+            self.sub_label_publisher.publish(
+                (object_id, consensus_label, consensus_score),
+                EventMetadataTypeEnum.sub_label,
+            )
+            self.requestor.send_data(
+                "tracked_object_update",
+                json.dumps(
+                    {
+                        "type": TrackedObjectUpdateTypesEnum.classification,
+                        "id": object_id,
+                        "camera": camera,
+                        "timestamp": timestamp,
+                        "model": self.model_config.name,
+                        "sub_label": consensus_label,
+                        "score": consensus_score,
+                    }
+                ),
+            )
+        elif (
+            self.model_config.object_config.classification_type
+            == ObjectClassificationType.attribute
+        ):
+            self.sub_label_publisher.publish(
+                (
+                    object_id,
+                    self.model_config.name,
+                    consensus_label,
+                    consensus_score,
+                ),
+                EventMetadataTypeEnum.attribute.value,
+            )
+            self.requestor.send_data(
+                "tracked_object_update",
+                json.dumps(
+                    {
+                        "type": TrackedObjectUpdateTypesEnum.classification,
+                        "id": object_id,
+                        "camera": camera,
+                        "timestamp": timestamp,
+                        "model": self.model_config.name,
+                        "attribute": consensus_label,
+                        "score": consensus_score,
+                    }
+                ),
+            )
+
     def get_weighted_score(
         self,
         object_id: str,
@@ -415,10 +550,6 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         if object_id not in self.classification_history:
             self.classification_history[object_id] = []
             logger.debug(f"Created new classification history for {object_id}")
-
-        self.classification_history[object_id].append(
-            (current_label, current_score, current_time)
-        )
 
         history = self.classification_history[object_id]
         logger.debug(
@@ -461,8 +592,8 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
 
         avg_score = sum(label_scores[best_label]) / len(label_scores[best_label])
 
-        if best_label == "none":
-            logger.debug(f"Filtering 'none' label for {object_id}")
+        if best_label in ("none", "pending"):
+            logger.debug(f"Filtering '{best_label}' label for {object_id}")
             return None, 0.0
 
         logger.debug(
@@ -494,6 +625,12 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         ):
             return
 
+        with self.interpreter_lock:
+            current_tasks = self.active_tasks.get(object_id, 0)
+            if current_tasks >= MAX_CONCURRENT_CLASSIFICATIONS_PER_OBJECT:
+                logger.debug(f"Object {object_id} has {current_tasks}/{MAX_CONCURRENT_CLASSIFICATIONS_PER_OBJECT} active tasks")
+                return
+
         now = datetime.datetime.now().timestamp()
         x, y, x2, y2 = calculate_region(
             frame.shape,
@@ -514,12 +651,14 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
             x:x2,
         ]
 
-        if crop.shape != (224, 224):
+        if crop.shape[:2] != (224, 224):
             try:
                 resized_crop = cv2.resize(crop, (224, 224))
             except Exception:
-                logger.warning("Failed to resize image for state classification")
+                logger.warning("Failed to resize image for object classification")
                 return
+        else:
+            resized_crop = crop
 
         if self.interpreter is None:
             save_attempts = (
@@ -545,110 +684,19 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
             self.classification_history[object_id].append(("unknown", 0.0, now))
             return
 
-        input = np.expand_dims(resized_crop, axis=0)
-        self.interpreter.set_tensor(self.tensor_input_details[0]["index"], input)
-        self.interpreter.invoke()
-        res: np.ndarray = self.interpreter.get_tensor(
-            self.tensor_output_details[0]["index"]
-        )[0]
-        probs = res / res.sum(axis=0)
-        logger.debug(
-            f"{self.model_config.name} Ran object classification with probabilities: {probs}"
-        )
-        best_id = np.argmax(probs)
-        score = round(probs[best_id], 2)
-        self.__update_metrics(datetime.datetime.now().timestamp() - now)
+        with self.interpreter_lock:
+            if object_id not in self.classification_history:
+                self.classification_history[object_id] = []
 
-        save_attempts = (
-            self.model_config.save_attempts
-            if self.model_config.save_attempts is not None
-            else 200
-        )
-        write_classification_attempt(
-            self.train_dir,
-            cv2.cvtColor(crop, cv2.COLOR_RGB2BGR),
-            object_id,
-            now,
-            self.labelmap[best_id],
-            score,
-            max_files=save_attempts,
-        )
+            self.classification_history[object_id].append(("pending", 0.0, now))
+            self.active_tasks[object_id] = self.active_tasks.get(object_id, 0) + 1
 
-        if score < self.model_config.threshold:
-            logger.debug(
-                f"{self.model_config.name}: Score {score} < threshold {self.model_config.threshold} for {object_id}, skipping"
-            )
-            return
-
-        sub_label = self.labelmap[best_id]
-
-        logger.debug(
-            f"{self.model_config.name}: Object {object_id} (label={obj_data['label']}) passed threshold with sub_label={sub_label}, score={score}"
-        )
-
-        consensus_label, consensus_score = self.get_weighted_score(
-            object_id, sub_label, score, now
-        )
-
-        logger.debug(
-            f"{self.model_config.name}: get_weighted_score returned consensus_label={consensus_label}, consensus_score={consensus_score} for {object_id}"
-        )
-
-        if consensus_label is not None:
-            camera = obj_data["camera"]
-            logger.debug(
-                f"{self.model_config.name}: Publishing sub_label={consensus_label} for {obj_data['label']} object {object_id} on {camera}"
-            )
-
-            if (
-                self.model_config.object_config.classification_type
-                == ObjectClassificationType.sub_label
-            ):
-                self.sub_label_publisher.publish(
-                    (object_id, consensus_label, consensus_score),
-                    EventMetadataTypeEnum.sub_label,
-                )
-                self.requestor.send_data(
-                    "tracked_object_update",
-                    json.dumps(
-                        {
-                            "type": TrackedObjectUpdateTypesEnum.classification,
-                            "id": object_id,
-                            "camera": camera,
-                            "timestamp": now,
-                            "model": self.model_config.name,
-                            "sub_label": consensus_label,
-                            "score": consensus_score,
-                        }
-                    ),
-                )
-            elif (
-                self.model_config.object_config.classification_type
-                == ObjectClassificationType.attribute
-            ):
-                self.sub_label_publisher.publish(
-                    (
-                        object_id,
-                        self.model_config.name,
-                        consensus_label,
-                        consensus_score,
-                    ),
-                    EventMetadataTypeEnum.attribute.value,
-                )
-                self.requestor.send_data(
-                    "tracked_object_update",
-                    json.dumps(
-                        {
-                            "type": TrackedObjectUpdateTypesEnum.classification,
-                            "id": object_id,
-                            "camera": camera,
-                            "timestamp": now,
-                            "model": self.model_config.name,
-                            "attribute": consensus_label,
-                            "score": consensus_score,
-                        }
-                    ),
-                )
+        threading.Thread(
+            target=self._run_inference_thread,
+            name=f"_classification_{object_id}",
+            daemon=True,
+            args=(resized_crop, object_id, obj_data["camera"], now),
+        ).start()
 
     def handle_request(self, topic, request_data):
         if topic == EmbeddingsRequestEnum.reload_classification_model.value:
@@ -667,8 +715,12 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
             return None
 
     def expire_object(self, object_id, camera):
+        """Clean up tracking data when an object expires."""
         if object_id in self.classification_history:
             self.classification_history.pop(object_id)
+        with self.interpreter_lock:
+            if object_id in self.active_tasks:
+                del self.active_tasks[object_id]
 
 
 @staticmethod
