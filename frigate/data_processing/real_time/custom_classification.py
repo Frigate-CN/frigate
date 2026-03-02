@@ -364,6 +364,7 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         self.classifications_per_second = EventsPerSecond()
         self.active_tasks: dict[str, int] = {}
         self.interpreter_lock = threading.Lock()
+        self.history_lock = threading.Lock()
 
         if (
             self.metrics
@@ -425,16 +426,6 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
 
                 label = self.labelmap[best_id]
 
-            # Update the "pending" entry in classification_history with the actual result
-            if object_id in self.classification_history:
-                for i, (hist_label, hist_score, hist_time) in enumerate(self.classification_history[object_id]):
-                    if hist_label == "pending" and abs(hist_time - timestamp) < 0.1:
-                        self.classification_history[object_id][i] = (label, score, timestamp)
-                        logger.debug(
-                            f"Updated pending entry for {object_id} at index {i}: {label} ({score})"
-                        )
-                        break
-
             save_attempts = (
                 self.model_config.save_attempts
                 if self.model_config.save_attempts is not None
@@ -457,6 +448,16 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
             ).start()
 
             if score >= self.model_config.threshold:
+                # Add result to history before publishing (will be included in consensus calculation)
+                with self.history_lock:
+                    if object_id not in self.classification_history:
+                        self.classification_history[object_id] = []
+
+                    self.classification_history[object_id].append((label, score, timestamp))
+                    logger.debug(
+                        f"Added classification result for {object_id}: {label} ({score}) at {timestamp}"
+                    )
+
                 self._publish_result(object_id, camera, label, score, timestamp)
         except Exception as e:
             logger.error(f"Error in inference thread for {object_id}: {e}", exc_info=True)
@@ -547,59 +548,77 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
         Requires 60% of attempts to agree on a label before publishing.
         Returns (weighted_label, weighted_score) or (None, 0.0) if no weighted score.
         """
-        if object_id not in self.classification_history:
-            self.classification_history[object_id] = []
-            logger.debug(f"Created new classification history for {object_id}")
+        with self.history_lock:
+            if object_id not in self.classification_history:
+                self.classification_history[object_id] = []
+                logger.debug(f"Created new classification history for {object_id}")
 
-        history = self.classification_history[object_id]
-        logger.debug(
-            f"History for {object_id}: {len(history)} entries, latest=({current_label}, {current_score})"
-        )
-
-        if len(history) < 3:
+            history = self.classification_history[object_id]
             logger.debug(
-                f"History for {object_id} has {len(history)} entries, need at least 3"
+                f"History for {object_id}: {len(history)} entries, latest=({current_label}, {current_score})"
             )
-            return None, 0.0
 
-        label_counts = {}
-        label_scores = {}
-        total_attempts = len(history)
+            label_counts = {}
+            label_scores = {}
 
-        for label, score, timestamp in history:
-            if label not in label_counts:
-                label_counts[label] = 0
-                label_scores[label] = []
+            for label, score, timestamp in history:
+                # Skip "pending", "unknown" entries in consensus calculation
+                if label in ("pending", "unknown"):
+                    continue
 
-            label_counts[label] += 1
-            label_scores[label].append(score)
+                if label not in label_counts:
+                    label_counts[label] = 0
+                    label_scores[label] = []
 
-        best_label = max(label_counts, key=label_counts.get)
-        best_count = label_counts[best_label]
+                label_counts[label] += 1
+                label_scores[label].append(score)
 
-        consensus_threshold = total_attempts * 0.6
-        logger.debug(
-            f"Consensus calc for {object_id}: label_counts={label_counts}, "
-            f"best_label={best_label}, best_count={best_count}, "
-            f"total={total_attempts}, threshold={consensus_threshold}"
-        )
+            # Filter out "none" labels as well
+            if "none" in label_counts:
+                del label_counts["none"]
+                del label_scores["none"]
 
-        if best_count < consensus_threshold:
+            if not label_counts:
+                logger.debug(f"No valid labels in history for {object_id}")
+                return None, 0.0
+
+            total_attempts = len([h for h in history if h[0] not in ("pending", "none", "unknown")])
+
+            # Check if we have enough valid attempts
+            if total_attempts < 3:
+                logger.debug(
+                    f"History for {object_id} has {total_attempts} valid entries, need at least 3"
+                )
+                return None, 0.0
+            best_label = max(label_counts, key=label_counts.get)
+            best_count = label_counts[best_label]
+
+            consensus_threshold = total_attempts * 0.6
             logger.debug(
-                f"No consensus for {object_id}: {best_count} < {consensus_threshold}"
+                f"Consensus calc for {object_id}: label_counts={label_counts}, "
+                f"best_label={best_label}, best_count={best_count}, "
+                f"total_valid={total_attempts}, threshold={consensus_threshold}"
             )
-            return None, 0.0
 
-        avg_score = sum(label_scores[best_label]) / len(label_scores[best_label])
+            if best_count < consensus_threshold:
+                logger.debug(
+                    f"No consensus for {object_id}: {best_count} < {consensus_threshold}"
+                )
+                return None, 0.0
 
-        if best_label in ("none", "pending"):
-            logger.debug(f"Filtering '{best_label}' label for {object_id}")
-            return None, 0.0
+            # Check if the average score meets the model threshold
+            avg_score = sum(label_scores[best_label]) / len(label_scores[best_label])
 
-        logger.debug(
-            f"Consensus reached for {object_id}: {best_label} with avg_score={avg_score}"
-        )
-        return best_label, avg_score
+            if avg_score < self.model_config.threshold:
+                logger.debug(
+                    f"Avg score {avg_score} below threshold {self.model_config.threshold} for {object_id}"
+                )
+                return None, 0.0
+
+            logger.debug(
+                f"Consensus reached for {object_id}: {best_label} with avg_score={avg_score}"
+            )
+            return best_label, avg_score
 
     def process_frame(self, obj_data, frame):
         if self.metrics and self.model_config.name in self.metrics.classification_cps:
@@ -678,17 +697,14 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
 
             # Still track history even when model doesn't exist to respect MAX_OBJECT_CLASSIFICATIONS
             # Add an entry with "unknown" label so the history limit is enforced
-            if object_id not in self.classification_history:
-                self.classification_history[object_id] = []
+            with self.history_lock:
+                if object_id not in self.classification_history:
+                    self.classification_history[object_id] = []
 
-            self.classification_history[object_id].append(("unknown", 0.0, now))
+                self.classification_history[object_id].append(("unknown", 0.0, now))
             return
 
         with self.interpreter_lock:
-            if object_id not in self.classification_history:
-                self.classification_history[object_id] = []
-
-            self.classification_history[object_id].append(("pending", 0.0, now))
             self.active_tasks[object_id] = self.active_tasks.get(object_id, 0) + 1
 
         threading.Thread(
@@ -716,8 +732,9 @@ class CustomObjectClassificationProcessor(RealTimeProcessorApi):
 
     def expire_object(self, object_id, camera):
         """Clean up tracking data when an object expires."""
-        if object_id in self.classification_history:
-            self.classification_history.pop(object_id)
+        with self.history_lock:
+            if object_id in self.classification_history:
+                self.classification_history.pop(object_id)
         with self.interpreter_lock:
             if object_id in self.active_tasks:
                 del self.active_tasks[object_id]
