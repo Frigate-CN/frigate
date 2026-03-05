@@ -94,6 +94,10 @@ class Embeddings:
         # Create tables if they don't exist
         self.db.create_embeddings_tables()
 
+        self.has_axengine = any(
+            d.type == "axengine" for d in self.config.detectors.values()
+        )
+
         models = self.get_model_definitions()
 
         for model in models:
@@ -106,25 +110,20 @@ class Embeddings:
             )
 
         if self.config.semantic_search.model == SemanticSearchModelEnum.jinav2:
-            # Single JinaV2Embedding instance for both text and vision
-            self.embedding = JinaV2Embedding(
-                model_size=self.config.semantic_search.model_size,
-                requestor=self.requestor,
-                device=config.semantic_search.device
-                or ("GPU" if config.semantic_search.model_size == "large" else "CPU"),
-            )
-            self.text_embedding = lambda input_data: self.embedding(
-                input_data, embedding_type="text"
-            )
-            self.vision_embedding = lambda input_data: self.embedding(
-                input_data, embedding_type="vision"
-            )
-        elif self.config.semantic_search.model == SemanticSearchModelEnum.ax_jinav2:
-            # AXJinaV2Embedding instance for both text and vision
-            self.embedding = AXJinaV2Embedding(
-                model_size=self.config.semantic_search.model_size,
-                requestor=self.requestor,
-            )
+            if self.has_axengine:
+                # AXJinaV2Embedding instance for both text and vision on Axera NPU
+                self.embedding = AXJinaV2Embedding(
+                    model_size=self.config.semantic_search.model_size,
+                    requestor=self.requestor,
+                )
+            else:
+                # Single JinaV2Embedding instance for both text and vision
+                self.embedding = JinaV2Embedding(
+                    model_size=self.config.semantic_search.model_size,
+                    requestor=self.requestor,
+                    device=config.semantic_search.device
+                    or ("GPU" if config.semantic_search.model_size == "large" else "CPU"),
+                )
             self.text_embedding = lambda input_data: self.embedding(
                 input_data, embedding_type="text"
             )
@@ -151,13 +150,20 @@ class Embeddings:
     def get_model_definitions(self):
         # Version-specific models
         if self.config.semantic_search.model == SemanticSearchModelEnum.jinav2:
-            models = [
-                "jinaai/jina-clip-v2-tokenizer",
-                "jinaai/jina-clip-v2-model_fp16.onnx"
-                if self.config.semantic_search.model_size == "large"
-                else "jinaai/jina-clip-v2-model_quantized.onnx",
-                "jinaai/jina-clip-v2-preprocessor_config.json",
-            ]
+            if self.has_axengine:
+                models = [
+                    "AXERA-TECH/jina-clip-v2-text_encoder.axmodel",
+                    "AXERA-TECH/jina-clip-v2-image_encoder.axmodel",
+                    "AXERA-TECH/jina-clip-v2-tokenizer",
+                ]
+            else:
+                models = [
+                    "jinaai/jina-clip-v2-tokenizer",
+                    "jinaai/jina-clip-v2-model_fp16.onnx"
+                    if self.config.semantic_search.model_size == "large"
+                    else "jinaai/jina-clip-v2-model_quantized.onnx",
+                    "jinaai/jina-clip-v2-preprocessor_config.json",
+                ]
         else:  # Default to jinav1
             models = [
                 "jinaai/jina-clip-v1-text_model_fp16.onnx",
