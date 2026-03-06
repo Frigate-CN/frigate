@@ -59,7 +59,7 @@ from frigate.data_processing.real_time.license_plate import (
 from frigate.data_processing.types import DataProcessorMetrics, PostProcessDataEnum
 from frigate.db.sqlitevecq import SqliteVecQueueDatabase
 from frigate.events.types import EventTypeEnum, RegenerateDescriptionEnum
-from frigate.genai import get_genai_client
+from frigate.genai import GenAIClientManager
 from frigate.models import Event, Recordings, ReviewSegment, Trigger
 from frigate.util.builtin import serialize
 from frigate.util.file import get_event_thumbnail_bytes
@@ -144,7 +144,7 @@ class EmbeddingMaintainer(threading.Thread):
         self.frame_manager = SharedMemoryFrameManager()
 
         self.detected_license_plates: dict[str, dict[str, Any]] = {}
-        self.genai_client = get_genai_client(config)
+        self.genai_manager = GenAIClientManager(config)
 
         # model runners to share between realtime and post processors
         if self.config.lpr.enabled:
@@ -203,12 +203,15 @@ class EmbeddingMaintainer(threading.Thread):
         # post processors
         self.post_processors: list[PostProcessorApi] = []
 
-        if self.genai_client is not None and any(
+        if self.genai_manager.vision_client is not None and any(
             c.review.genai.enabled_in_config for c in self.config.cameras.values()
         ):
             self.post_processors.append(
                 ReviewDescriptionProcessor(
-                    self.config, self.requestor, self.metrics, self.genai_client
+                    self.config,
+                    self.requestor,
+                    self.metrics,
+                    self.genai_manager.vision_client,
                 )
             )
 
@@ -246,7 +249,7 @@ class EmbeddingMaintainer(threading.Thread):
             )
             self.post_processors.append(semantic_trigger_processor)
 
-        if self.genai_client is not None and any(
+        if self.genai_manager.vision_client is not None and any(
             c.objects.genai.enabled_in_config for c in self.config.cameras.values()
         ):
             self.post_processors.append(
@@ -255,7 +258,7 @@ class EmbeddingMaintainer(threading.Thread):
                     self.embeddings,
                     self.requestor,
                     self.metrics,
-                    self.genai_client,
+                    self.genai_manager.vision_client,
                     semantic_trigger_processor,
                 )
             )
@@ -418,7 +421,9 @@ class EmbeddingMaintainer(threading.Thread):
         if self.config.semantic_search.enabled:
             self.embeddings.update_stats()
 
-        camera_config = self.config.cameras[camera]
+        camera_config = self.config.cameras.get(camera)
+        if camera_config is None:
+            return
 
         # no need to process updated objects if no processors are active
         if len(self.realtime_processors) == 0 and len(self.post_processors) == 0:
@@ -636,7 +641,10 @@ class EmbeddingMaintainer(threading.Thread):
         if not camera or camera not in self.config.cameras:
             return
 
-        camera_config = self.config.cameras[camera]
+        camera_config = self.config.cameras.get(camera)
+        if camera_config is None:
+            return
+
         dedicated_lpr_enabled = (
             camera_config.type == CameraTypeEnum.lpr
             and "license_plate" not in camera_config.objects.track

@@ -9,12 +9,23 @@ from typing import Any, Optional
 
 from playhouse.shortcuts import model_to_dict
 
-from frigate.config import CameraConfig, FrigateConfig, GenAIConfig, GenAIProviderEnum
+from frigate.config import CameraConfig, GenAIConfig, GenAIProviderEnum
 from frigate.const import CLIPS_DIR
 from frigate.data_processing.post.types import ReviewMetadata
+from frigate.genai.manager import GenAIClientManager
 from frigate.models import Event
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "GenAIClient",
+    "GenAIClientManager",
+    "GenAIConfig",
+    "GenAIProviderEnum",
+    "PROVIDERS",
+    "load_providers",
+    "register_genai_provider",
+]
 
 PROVIDERS = {}
 
@@ -69,7 +80,7 @@ class GenAIClient:
                 return "\n- (No objects detected)"
 
         context_prompt = f"""
-Your task is to analyze the sequence of images ({len(thumbnails)} total) taken in chronological order from the perspective of the {review_data["camera"]} security camera.
+Your task is to analyze a sequence of images taken in chronological order from a security camera.
 
 ## Normal Activity Patterns for This Property
 
@@ -108,7 +119,8 @@ Your response MUST be a flat JSON object with:
 
 ## Sequence Details
 
-- Frame 1 = earliest, Frame {len(thumbnails)} = latest
+- Camera: {review_data["camera"]}
+- Total frames: {len(thumbnails)} (Frame 1 = earliest, Frame {len(thumbnails)} = latest)
 - Activity started at {review_data["start"]} and lasted {review_data["duration"]} seconds
 - Zones involved: {", ".join(review_data["zones"]) if review_data["zones"] else "None"}
 
@@ -292,18 +304,63 @@ Guidelines:
         """Get the context window size for this provider in tokens."""
         return 4096
 
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        tool_choice: Optional[str] = "auto",
+    ) -> dict[str, Any]:
+        """
+        Send chat messages to LLM with optional tool definitions.
 
-def get_genai_client(config: FrigateConfig) -> Optional[GenAIClient]:
-    """Get the GenAI client."""
-    if not config.genai.provider:
-        return None
+        This method handles conversation-style interactions with the LLM,
+        including function calling/tool usage capabilities.
 
-    load_providers()
-    provider = PROVIDERS.get(config.genai.provider)
-    if provider:
-        return provider(config.genai)
+        Args:
+            messages: List of message dictionaries. Each message should have:
+                - 'role': str - One of 'user', 'assistant', 'system', or 'tool'
+                - 'content': str - The message content
+                - 'tool_call_id': Optional[str] - For tool responses, the ID of the tool call
+                - 'name': Optional[str] - For tool messages, the tool name
+            tools: Optional list of tool definitions in OpenAI-compatible format.
+                   Each tool should have 'type': 'function' and 'function' with:
+                   - 'name': str - Tool name
+                   - 'description': str - Tool description
+                   - 'parameters': dict - JSON schema for parameters
+            tool_choice: How the model should handle tools:
+                - 'auto': Model decides whether to call tools
+                - 'none': Model must not call tools
+                - 'required': Model must call at least one tool
+                - Or a dict specifying a specific tool to call
+            **kwargs: Additional provider-specific parameters.
 
-    return None
+        Returns:
+            Dictionary with:
+            - 'content': Optional[str] - The text response from the LLM, None if tool calls
+            - 'tool_calls': Optional[List[Dict]] - List of tool calls if LLM wants to call tools.
+              Each tool call dict has:
+                - 'id': str - Unique identifier for this tool call
+                - 'name': str - Tool name to call
+                - 'arguments': dict - Arguments for the tool call (parsed JSON)
+            - 'finish_reason': str - Reason generation stopped:
+                - 'stop': Normal completion
+                - 'tool_calls': LLM wants to call tools
+                - 'length': Hit token limit
+                - 'error': An error occurred
+
+        Raises:
+            NotImplementedError: If the provider doesn't implement this method.
+        """
+        # Base implementation - each provider should override this
+        logger.warning(
+            f"{self.__class__.__name__} does not support chat_with_tools. "
+            "This method should be overridden by the provider implementation."
+        )
+        return {
+            "content": None,
+            "tool_calls": None,
+            "finish_reason": "error",
+        }
 
 
 def load_providers():

@@ -1,5 +1,5 @@
 import { baseUrl } from "./baseUrl";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";
 import {
   EmbeddingsReindexProgressType,
@@ -11,10 +11,18 @@ import {
   TrackedObjectUpdateReturnType,
   TriggerStatus,
   FrigateAudioDetections,
+  Job,
 } from "@/types/ws";
 import { FrigateStats } from "@/types/stats";
 import { createContainer } from "react-tracked";
 import useDeepMemo from "@/hooks/use-deep-memo";
+
+export type WsFeedMessage = {
+  topic: string;
+  payload: unknown;
+  timestamp: number;
+  id: string;
+};
 
 type Update = {
   topic: string;
@@ -27,6 +35,9 @@ type WsState = {
 };
 
 type useValueReturn = [WsState, (update: Update) => void];
+
+const wsMessageSubscribers = new Set<(msg: WsFeedMessage) => void>();
+let wsMessageIdCounter = 0;
 
 function useValue(): useValueReturn {
   const wsUrl = `${baseUrl.replace(/^http/, "ws")}ws`;
@@ -42,8 +53,13 @@ function useValue(): useValueReturn {
       return;
     }
 
-    const cameraActivity: { [key: string]: FrigateCameraState } =
-      JSON.parse(activityValue);
+    let cameraActivity: { [key: string]: Partial<FrigateCameraState> };
+
+    try {
+      cameraActivity = JSON.parse(activityValue);
+    } catch {
+      return;
+    }
 
     if (Object.keys(cameraActivity).length === 0) {
       return;
@@ -52,6 +68,12 @@ function useValue(): useValueReturn {
     const cameraStates: WsState = {};
 
     Object.entries(cameraActivity).forEach(([name, state]) => {
+      const cameraConfig = state?.config;
+
+      if (!cameraConfig) {
+        return;
+      }
+
       const {
         record,
         detect,
@@ -66,7 +88,7 @@ function useValue(): useValueReturn {
         detections,
         object_descriptions,
         review_descriptions,
-      } = state["config"];
+      } = cameraConfig;
       cameraStates[`${name}/recordings/state`] = record ? "ON" : "OFF";
       cameraStates[`${name}/enabled/state`] = enabled ? "ON" : "OFF";
       cameraStates[`${name}/detect/state`] = detect ? "ON" : "OFF";
@@ -114,6 +136,17 @@ function useValue(): useValueReturn {
           ...prevState,
           [data.topic]: data.payload,
         }));
+
+        // Notify feed subscribers
+        if (wsMessageSubscribers.size > 0) {
+          const feedMsg: WsFeedMessage = {
+            topic: data.topic,
+            payload: data.payload,
+            timestamp: Date.now(),
+            id: String(wsMessageIdCounter++),
+          };
+          wsMessageSubscribers.forEach((cb) => cb(feedMsg));
+        }
       }
     },
     onOpen: () => {
@@ -299,6 +332,57 @@ export function useReviewDescriptionState(camera: string): {
   } = useWs(
     `${camera}/review_descriptions/state`,
     `${camera}/review_descriptions/set`,
+  );
+  return { payload: payload as ToggleableSetting, send };
+}
+
+export function useMotionMaskState(
+  camera: string,
+  maskName: string,
+): {
+  payload: ToggleableSetting;
+  send: (payload: ToggleableSetting, retain?: boolean) => void;
+} {
+  const {
+    value: { payload },
+    send,
+  } = useWs(
+    `${camera}/motion_mask/${maskName}/state`,
+    `${camera}/motion_mask/${maskName}/set`,
+  );
+  return { payload: payload as ToggleableSetting, send };
+}
+
+export function useObjectMaskState(
+  camera: string,
+  maskName: string,
+): {
+  payload: ToggleableSetting;
+  send: (payload: ToggleableSetting, retain?: boolean) => void;
+} {
+  const {
+    value: { payload },
+    send,
+  } = useWs(
+    `${camera}/object_mask/${maskName}/state`,
+    `${camera}/object_mask/${maskName}/set`,
+  );
+  return { payload: payload as ToggleableSetting, send };
+}
+
+export function useZoneState(
+  camera: string,
+  zoneName: string,
+): {
+  payload: ToggleableSetting;
+  send: (payload: ToggleableSetting, retain?: boolean) => void;
+} {
+  const {
+    value: { payload },
+    send,
+  } = useWs(
+    `${camera}/zone/${zoneName}/state`,
+    `${camera}/zone/${zoneName}/set`,
   );
   return { payload: payload as ToggleableSetting, send };
 }
@@ -650,4 +734,54 @@ export function useTriggers(): { payload: TriggerStatus } {
     ? JSON.parse(payload as string)
     : { name: "", camera: "", event_id: "", type: "", score: 0 };
   return { payload: useDeepMemo(parsed) };
+}
+
+export function useJobStatus(
+  jobType: string,
+  revalidateOnFocus: boolean = true,
+): { payload: Job | null } {
+  const {
+    value: { payload },
+    send: sendCommand,
+  } = useWs("job_state", "jobState");
+
+  const jobData = useDeepMemo(
+    payload && typeof payload === "string" ? JSON.parse(payload) : {},
+  );
+  const currentJob = jobData[jobType] || null;
+
+  useEffect(() => {
+    let listener: (() => void) | undefined;
+    if (revalidateOnFocus) {
+      sendCommand("jobState");
+      listener = () => {
+        if (document.visibilityState === "visible") {
+          sendCommand("jobState");
+        }
+      };
+      addEventListener("visibilitychange", listener);
+    }
+
+    return () => {
+      if (listener) {
+        removeEventListener("visibilitychange", listener);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revalidateOnFocus]);
+
+  return { payload: currentJob as Job | null };
+}
+
+export function useWsMessageSubscribe(callback: (msg: WsFeedMessage) => void) {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+
+  useEffect(() => {
+    const handler = (msg: WsFeedMessage) => callbackRef.current(msg);
+    wsMessageSubscribers.add(handler);
+    return () => {
+      wsMessageSubscribers.delete(handler);
+    };
+  }, []);
 }
