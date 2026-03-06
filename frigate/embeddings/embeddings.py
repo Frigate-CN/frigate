@@ -122,7 +122,9 @@ class Embeddings:
                     model_size=self.config.semantic_search.model_size,
                     requestor=self.requestor,
                     device=config.semantic_search.device
-                    or ("GPU" if config.semantic_search.model_size == "large" else "CPU"),
+                    or (
+                        "GPU" if config.semantic_search.model_size == "large" else "CPU"
+                    ),
                 )
             self.text_embedding = lambda input_data: self.embedding(
                 input_data, embedding_type="text"
