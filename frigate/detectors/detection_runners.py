@@ -10,10 +10,6 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 
-from frigate.util.axengine_converter import (
-    auto_convert_model as auto_load_axengine_model,
-)
-from frigate.util.axengine_converter import is_axengine_compatible
 from frigate.util.model import get_ort_providers
 from frigate.util.rknn_converter import auto_convert_model, is_rknn_compatible
 
@@ -672,6 +668,11 @@ def get_optimized_runner(
 ) -> BaseModelRunner:
     """Get an optimized runner for the hardware."""
     device = device or "AUTO"
+
+    from frigate.util.axengine_converter import (
+        auto_convert_model as auto_load_axengine_model,
+    )
+    from frigate.util.axengine_converter import is_axengine_compatible
 
     if is_axengine_compatible(model_path, device, model_type):
         axmodel_path = auto_load_axengine_model(model_path, model_type)
